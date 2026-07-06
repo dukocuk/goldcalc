@@ -68,35 +68,18 @@ function compute({ spot, price, gram, purity }) {
 }
 
 // ---- live spot fetch (DKK per gram of pure gold) ----
-// goldprice.org sends no Access-Control-Allow-Origin header. In dev this goes
-// through the Vite proxy (vite.config.js, /api/goldprice); in production
-// (GitHub Pages, no server-side proxy available) it's routed through the
-// public CORS proxy corsproxy.io instead.
-const GOLDPRICE_BASE = "https://data-asg.goldprice.org/dbXRates";
-function goldpriceUrl(path) {
-  if (import.meta.env.DEV) return `/api/goldprice/${path}`;
-  return `https://corsproxy.io/?url=${encodeURIComponent(`${GOLDPRICE_BASE}/${path}`)}`;
-}
+// api.gold-api.com returns Access-Control-Allow-Origin: * so no proxy is needed
+// in dev or prod (unlike goldprice.org, which blocks non-browser/datacenter IPs).
 async function fetchSpotDKKperGram() {
-  // 1) goldprice.org, DKK per ounce directly
-  try {
-    const r = await fetch(goldpriceUrl("DKK"), { cache: "no-store" });
-    const d = await r.json();
-    const oz = d?.items?.[0]?.xauPrice;
-    if (oz > 0) return { value: oz / OZ, source: "goldprice.org" };
-  } catch (e) { /* fall through */ }
-  // 2) goldprice.org USD per ounce × USD→DKK
-  try {
-    const [gr, fr] = await Promise.all([
-      fetch(goldpriceUrl("USD"), { cache: "no-store" }),
-      fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store" }),
-    ]);
-    const gd = await gr.json();
-    const fx = await fr.json();
-    const ozUsd = gd?.items?.[0]?.xauPrice;
-    const dkk = fx?.rates?.DKK;
-    if (ozUsd > 0 && dkk > 0) return { value: (ozUsd / OZ) * dkk, source: "goldprice.org + FX" };
-  } catch (e) { /* fall through */ }
+  const [gr, fr] = await Promise.all([
+    fetch("https://api.gold-api.com/price/XAU", { cache: "no-store" }),
+    fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store" }),
+  ]);
+  const g = await gr.json();
+  const fx = await fr.json();
+  const ozUsd = g?.price;
+  const dkk = fx?.rates?.DKK;
+  if (ozUsd > 0 && dkk > 0) return { value: (ozUsd / OZ) * dkk, source: "gold-api.com + FX" };
   throw new Error("no-source");
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 
 // ---- design tokens (matches the printed feltkort) ----
 const T = {
@@ -75,9 +75,9 @@ async function fetchSpotDKKperGram() {
     fetch("https://api.gold-api.com/price/XAU", { cache: "no-store" }),
     fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store" }),
   ]);
-  const g = await gr.json();
+  const gold = await gr.json();
   const fx = await fr.json();
-  const ozUsd = g?.price;
+  const ozUsd = gold?.price;
   const dkk = fx?.rates?.DKK;
   if (ozUsd > 0 && dkk > 0) return { value: (ozUsd / OZ) * dkk, source: "gold-api.com + FX" };
   throw new Error("no-source");
@@ -102,7 +102,7 @@ export default function GoldValueCalculator() {
         source,
       });
       setSpotStatus("live");
-    } catch (e) {
+    } catch {
       setSpotStatus("error");
     }
   }, []);
@@ -277,7 +277,7 @@ export default function GoldValueCalculator() {
 
         <div style={{ marginTop: 28, paddingTop: 14, borderTop: `1px solid ${T.line}`, fontFamily: T.mono, fontSize: 12, color: T.inkSoft, lineHeight: 1.9 }}>
           <div><span style={{ color: T.good }}>●</span> 0–10 % over spot: fremragende &nbsp;·&nbsp; <span style={{ color: T.ok }}>●</span> 10–25 %: OK &nbsp;·&nbsp; <span style={{ color: T.bad }}>●</span> 25 %+: for dyrt</div>
-          <div style={{ marginTop: 4 }}>Spot hentes fra goldprice.org. Går hentningen ikke igennem, kan du taste dagens gram-pris selv.</div>
+          <div style={{ marginTop: 4 }}>Spot hentes fra gold-api.com. Går hentningen ikke igennem, kan du taste dagens gram-pris selv.</div>
         </div>
 
       </div>

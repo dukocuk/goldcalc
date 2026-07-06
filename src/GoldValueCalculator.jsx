@@ -68,12 +68,19 @@ function compute({ spot, price, gram, purity }) {
 }
 
 // ---- live spot fetch (DKK per gram of pure gold) ----
-// goldprice.org sends no Access-Control-Allow-Origin header, so in dev this
-// goes through the Vite proxy configured in vite.config.js (/api/goldprice).
+// goldprice.org sends no Access-Control-Allow-Origin header. In dev this goes
+// through the Vite proxy (vite.config.js, /api/goldprice); in production
+// (GitHub Pages, no server-side proxy available) it's routed through the
+// public CORS proxy corsproxy.io instead.
+const GOLDPRICE_BASE = "https://data-asg.goldprice.org/dbXRates";
+function goldpriceUrl(path) {
+  if (import.meta.env.DEV) return `/api/goldprice/${path}`;
+  return `https://corsproxy.io/?url=${encodeURIComponent(`${GOLDPRICE_BASE}/${path}`)}`;
+}
 async function fetchSpotDKKperGram() {
   // 1) goldprice.org, DKK per ounce directly
   try {
-    const r = await fetch("/api/goldprice/DKK", { cache: "no-store" });
+    const r = await fetch(goldpriceUrl("DKK"), { cache: "no-store" });
     const d = await r.json();
     const oz = d?.items?.[0]?.xauPrice;
     if (oz > 0) return { value: oz / OZ, source: "goldprice.org" };
@@ -81,7 +88,7 @@ async function fetchSpotDKKperGram() {
   // 2) goldprice.org USD per ounce × USD→DKK
   try {
     const [gr, fr] = await Promise.all([
-      fetch("/api/goldprice/USD", { cache: "no-store" }),
+      fetch(goldpriceUrl("USD"), { cache: "no-store" }),
       fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store" }),
     ]);
     const gd = await gr.json();

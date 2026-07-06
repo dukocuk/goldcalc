@@ -35,12 +35,15 @@ goldcalc/
 Single file containing all logic and presentation.
 
 **Constants / data**
-- `T` — design tokens (colors, font stacks) matching a printed "feltkort" look
+- `T` — design tokens (font stacks + CSS custom-property refs); colors live in the `CSS`
+  string (`:root` light palette + `prefers-color-scheme: dark` override + hover/focus rules)
 - `OZ = 31.1035` — grams per troy ounce
 - `KARATS` — karat→purity table (24k…8k)
+- `LS_KEY` / `loadList()` — comparison list persisted to `localStorage` (`goldcalc.list`)
 
 **Pure helpers**
-- `num(s)` — parse Danish-style input (comma decimals, dot thousands) → number
+- `num(s)` — parse Danish-style input (comma decimals, dot thousands; a lone dot is a
+  thousands separator only when grouping exactly 3 digits — `"8.8"` → 8.8, `"8.800"` → 8800)
 - `kr / krg / g / pct` — Danish-locale formatters (kr, kr/g, grams, signed %)
 - `verdictFor(overSpot)` — grades premium over spot: Under spot / Fremragende / OK / For dyrt
 - `compute({spot, price, gram, purity})` — core math: pure-gold weight, gold value,
@@ -49,6 +52,7 @@ Single file containing all logic and presentation.
 **Data fetch**
 - `fetchSpotDKKperGram()` — spot price in DKK/gram of pure gold; combines
   gold price (USD/oz) with USD→DKK FX. Both endpoints are CORS-open, so no proxy.
+  8 s `AbortSignal.timeout` → on failure the UI falls back to manual entry.
 
 **Components**
 - `GoldValueCalculator` (default export) — state, spot auto-load, inputs, result card,

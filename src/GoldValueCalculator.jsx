@@ -1,22 +1,49 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 
 // ---- design tokens (matches the printed feltkort) ----
+// Colors live in CSS custom properties (see CSS below) so the palette can
+// switch with prefers-color-scheme; T just references the variables.
 const T = {
-  paper: "#FBFAF6",
-  card: "#FFFFFF",
-  ink: "#1C1B18",
-  inkSoft: "#5A574E",
-  line: "#DED8CA",
-  lineSoft: "#EBE7DC",
-  gold: "#A67C1A",
-  goldBg: "#F6EFDC",
-  good: "#3F7A5A",
-  ok: "#8A6D1E",
-  bad: "#A6483C",
+  paper: "var(--paper)",
+  card: "var(--card)",
+  ink: "var(--ink)",
+  inkSoft: "var(--ink-soft)",
+  line: "var(--line)",
+  lineSoft: "var(--line-soft)",
+  gold: "var(--gold)",
+  goldBg: "var(--gold-bg)",
+  good: "var(--good)",
+  ok: "var(--ok)",
+  bad: "var(--bad)",
   mono: 'ui-monospace,"SF Mono",Menlo,Consolas,monospace',
   serif: 'Georgia,"Times New Roman",serif',
   sans: '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif',
 };
+
+// Palette + pseudo-states (hover/focus) that inline styles can't express.
+const CSS = `
+:root {
+  --paper:#FBFAF6; --card:#FFFFFF; --ink:#1C1B18; --ink-soft:#5A574E;
+  --line:#DED8CA; --line-soft:#EBE7DC; --gold:#A67C1A; --gold-bg:#F6EFDC;
+  --good:#3F7A5A; --ok:#8A6D1E; --bad:#A6483C;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:#14130F; --card:#1E1C17; --ink:#EDEAE0; --ink-soft:#A39F92;
+    --line:#3A362C; --line-soft:#2A2721; --gold:#D4A72C; --gold-bg:#2E2712;
+    --good:#6FBF94; --ok:#C9A84C; --bad:#D97B6C;
+  }
+}
+input:focus-visible, button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.link-btn:hover { color: var(--ink); }
+.karat-btn:hover { border-color: var(--gold); }
+.save-btn:not(:disabled):hover { opacity: .88; }
+.save-btn:not(:disabled):active { transform: translateY(1px); }
+.remove-btn:hover { color: var(--bad); }
+@media (max-width: 380px) {
+  .metric-grid { grid-template-columns: 1fr !important; }
+}
+`;
 
 const OZ = 31.1035; // gram per troy ounce
 
@@ -30,10 +57,18 @@ const KARATS = [
   { k: "8k", purity: 0.333 },
 ];
 
-// parse Danish-style input (comma decimals, dot thousands)
+// parse Danish-style input (comma decimals, dot thousands).
+// A lone dot is only a thousands separator when it groups exactly 3 digits
+// ("8.800" → 8800); otherwise it's a decimal point ("8.8" → 8.8).
 const num = (s) => {
   if (s === "" || s == null) return NaN;
-  const v = parseFloat(String(s).replace(/\./g, "").replace(",", "."));
+  let t = String(s).trim();
+  if (t.includes(",")) {
+    t = t.replace(/\./g, "").replace(",", ".");
+  } else if ((t.match(/\./g) || []).length > 1 || /^\d{1,3}(\.\d{3})+$/.test(t)) {
+    t = t.replace(/\./g, "");
+  }
+  const v = parseFloat(t);
   return isNaN(v) ? NaN : v;
 };
 const kr = (v) =>
@@ -71,9 +106,10 @@ function compute({ spot, price, gram, purity }) {
 // api.gold-api.com returns Access-Control-Allow-Origin: * so no proxy is needed
 // in dev or prod (unlike goldprice.org, which blocks non-browser/datacenter IPs).
 async function fetchSpotDKKperGram() {
+  const signal = AbortSignal.timeout(8000); // don't hang forever on a dead API
   const [gr, fr] = await Promise.all([
-    fetch("https://api.gold-api.com/price/XAU", { cache: "no-store" }),
-    fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store" }),
+    fetch("https://api.gold-api.com/price/XAU", { cache: "no-store", signal }),
+    fetch("https://open.er-api.com/v6/latest/USD", { cache: "no-store", signal }),
   ]);
   const gold = await gr.json();
   const fx = await fr.json();
@@ -83,6 +119,17 @@ async function fetchSpotDKKperGram() {
   throw new Error("no-source");
 }
 
+// ---- comparison-list persistence ----
+const LS_KEY = "goldcalc.list";
+const loadList = () => {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_KEY));
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+};
+
 export default function GoldValueCalculator() {
   const [spot, setSpot] = useState("");
   const [spotStatus, setSpotStatus] = useState("loading"); // loading | live | manual | error
@@ -90,7 +137,11 @@ export default function GoldValueCalculator() {
   const [price, setPrice] = useState("");
   const [gram, setGram] = useState("");
   const [karat, setKarat] = useState("22k");
-  const [list, setList] = useState([]);
+  const [list, setList] = useState(loadList);
+
+  useEffect(() => {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch { /* storage full/blocked */ }
+  }, [list]);
 
   const loadSpot = useCallback(async () => {
     setSpotStatus("loading");
@@ -116,7 +167,7 @@ export default function GoldValueCalculator() {
 
   const add = () => {
     if (!r) return;
-    setList((l) => [{ id: Date.now(), karat, gram: num(gram), price: num(price), ...r }, ...l]);
+    setList((l) => [{ id: Date.now(), karat, gram: num(gram), price: num(price), spotAtSave: num(spot), ...r }, ...l]);
   };
 
   const S = {
@@ -136,6 +187,7 @@ export default function GoldValueCalculator() {
 
   return (
     <div style={{ background: T.paper, minHeight: "100%", fontFamily: T.sans, color: T.ink, padding: "24px 16px 56px" }}>
+      <style>{CSS}</style>
       <div style={{ maxWidth: 560, margin: "0 auto" }}>
 
         <div style={{ borderBottom: `2px solid ${T.ink}`, paddingBottom: 16, marginBottom: 22 }}>
@@ -153,8 +205,9 @@ export default function GoldValueCalculator() {
         {/* SPOT — auto */}
         <div style={{ marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-            <label style={{ ...S.label, marginBottom: 0 }}>Spotpris (auto)</label>
+            <label htmlFor="spot-input" style={{ ...S.label, marginBottom: 0 }}>Spotpris (auto)</label>
             <button
+              className="link-btn"
               onClick={loadSpot}
               disabled={spotStatus === "loading"}
               style={{ background: "none", border: "none", cursor: spotStatus === "loading" ? "default" : "pointer", fontFamily: T.mono, fontSize: 12, color: T.gold, textDecoration: "underline", padding: 0 }}
@@ -164,6 +217,7 @@ export default function GoldValueCalculator() {
           </div>
           <div style={{ position: "relative" }}>
             <input
+              id="spot-input"
               style={{ ...S.input, borderColor: spotStatus === "live" ? T.good : spotStatus === "error" ? T.bad : T.line }}
               inputMode="decimal"
               value={spot}
@@ -172,7 +226,7 @@ export default function GoldValueCalculator() {
             />
             <span style={S.suffix}>kr / gram</span>
           </div>
-          <div style={{ fontFamily: T.mono, fontSize: 11.5, color: tag.color, marginTop: 6 }}>
+          <div aria-live="polite" style={{ fontFamily: T.mono, fontSize: 11.5, color: tag.color, marginTop: 6 }}>
             {tag.text}
             {spotStatus === "live" && <span style={{ color: T.inkSoft }}> · ren spot, dealer-gram ligger typisk lidt over</span>}
           </div>
@@ -181,26 +235,26 @@ export default function GoldValueCalculator() {
         {/* inputs */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           <div style={{ position: "relative" }}>
-            <label style={S.label}>Pris</label>
+            <label htmlFor="price-input" style={S.label}>Pris</label>
             <div style={{ position: "relative" }}>
-              <input style={S.input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="8.800" />
+              <input id="price-input" style={S.input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="8.800" />
               <span style={S.suffix}>kr</span>
             </div>
           </div>
           <div style={{ position: "relative" }}>
-            <label style={S.label}>Vægt</label>
+            <label htmlFor="gram-input" style={S.label}>Vægt</label>
             <div style={{ position: "relative" }}>
-              <input style={S.input} inputMode="decimal" value={gram} onChange={(e) => setGram(e.target.value)} placeholder="12" />
+              <input id="gram-input" style={S.input} inputMode="decimal" value={gram} onChange={(e) => setGram(e.target.value)} placeholder="12" />
               <span style={S.suffix}>g</span>
             </div>
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
-            <label style={S.label}>Karat</label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+            <label style={S.label} id="karat-label">Karat</label>
+            <div role="group" aria-labelledby="karat-label" style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
               {KARATS.map((x) => {
                 const on = x.k === karat;
                 return (
-                  <button key={x.k} onClick={() => setKarat(x.k)}
+                  <button key={x.k} className="karat-btn" aria-pressed={on} onClick={() => setKarat(x.k)}
                     style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 600, cursor: "pointer", padding: "8px 12px", borderRadius: 5, border: `1px solid ${on ? T.gold : T.line}`, background: on ? T.goldBg : T.card, color: on ? T.gold : T.inkSoft }}>
                     {x.k}
                     <span style={{ fontSize: 10.5, color: T.inkSoft, marginLeft: 5, fontWeight: 400 }}>
@@ -228,7 +282,7 @@ export default function GoldValueCalculator() {
               {r ? pct(r.overSpot) : "—"}
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+          <div className="metric-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
             <Metric label="Din guldpris" value={r ? krg(r.pricePerG) : "—"} big accent />
             <Metric label="Spot-gulv" value={isFinite(num(spot)) ? krg(num(spot)) : "—"} big />
             <Metric label="Rent guld i stykket" value={r ? g(r.pure) : "—"} />
@@ -237,7 +291,7 @@ export default function GoldValueCalculator() {
           </div>
         </div>
 
-        <button onClick={add} disabled={!r}
+        <button className="save-btn" onClick={add} disabled={!r}
           style={{ width: "100%", marginTop: 12, padding: "13px", borderRadius: 6, cursor: r ? "pointer" : "not-allowed", fontFamily: T.sans, fontSize: 15, fontWeight: 600, border: `1px solid ${r ? T.ink : T.line}`, background: r ? T.ink : T.card, color: r ? T.paper : T.inkSoft }}>
           Gem til sammenligning
         </button>
@@ -246,7 +300,7 @@ export default function GoldValueCalculator() {
           <div style={{ marginTop: 26 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
               <div style={{ fontFamily: T.serif, fontSize: 18, fontWeight: 600 }}>Sammenligning</div>
-              <button onClick={() => setList([])} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: T.mono, fontSize: 12, color: T.inkSoft, textDecoration: "underline" }}>
+              <button className="link-btn" onClick={() => setList([])} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: T.mono, fontSize: 12, color: T.inkSoft, textDecoration: "underline" }}>
                 Ryd alle
               </button>
             </div>
@@ -268,7 +322,7 @@ export default function GoldValueCalculator() {
                       {best && <span style={{ color: T.good, fontWeight: 600 }}> · bedste køb</span>}
                     </div>
                   </div>
-                  <button onClick={() => setList((l) => l.filter((i) => i.id !== x.id))} style={{ background: "none", border: "none", cursor: "pointer", color: T.inkSoft, fontSize: 18, lineHeight: 1, padding: 4, flex: "none" }} aria-label="Fjern">×</button>
+                  <button className="remove-btn" onClick={() => setList((l) => l.filter((i) => i.id !== x.id))} style={{ background: "none", border: "none", cursor: "pointer", color: T.inkSoft, fontSize: 18, lineHeight: 1, padding: 4, flex: "none" }} aria-label="Fjern">×</button>
                 </div>
               );
             })}

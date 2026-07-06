@@ -6,9 +6,10 @@
 ## Overview
 
 **goldcalc** ("Guld eller markup?") is a Danish-language single-page web app that tells
-you whether a gold purchase is a good deal. You enter price, weight, and karat; it fetches
-the live spot price and shows your real price per gram of pure gold and how far over spot
-you are paying. The entire app is **one React component** plus scaffolding.
+you whether a gold purchase is a good deal. You enter price, weight, karat, and an optional
+dealer buy-back spread; it fetches the live spot price (selectable currency: DKK/TRY/EUR/USD)
+and shows your real price per gram of pure gold, how far over spot you are paying, and the
+break-even spot price for reselling. The entire app is **one React component** plus scaffolding.
 
 **Stack:** React 18 · Vite 5 · plain inline-style UI (no CSS framework) · deployed to GitHub Pages.
 
@@ -39,20 +40,26 @@ Single file containing all logic and presentation.
   string (`:root` light palette + `prefers-color-scheme: dark` override + hover/focus rules)
 - `OZ = 31.1035` — grams per troy ounce
 - `KARATS` — karat→purity table (24k…8k)
+- `CURRENCIES` / `unitFor(code)` — selectable currencies (DKK kr, TRY ₺, EUR €, USD $)
 - `LS_KEY` / `loadList()` — comparison list persisted to `localStorage` (`goldcalc.list`)
+- `CUR_KEY` — selected currency persisted to `localStorage` (`goldcalc.currency`)
 
 **Pure helpers**
 - `num(s)` — parse Danish-style input (comma decimals, dot thousands; a lone dot is a
   thousands separator only when grouping exactly 3 digits — `"8.8"` → 8.8, `"8.800"` → 8800)
-- `kr / krg / g / pct` — Danish-locale formatters (kr, kr/g, grams, signed %)
+- `money / moneyPerG / g / pct` — Danish-locale formatters (amount + unit, per-gram, grams, signed %)
 - `verdictFor(overSpot)` — grades premium over spot: Under spot / Fremragende / OK / For dyrt
-- `compute({spot, price, gram, purity})` — core math: pure-gold weight, gold value,
-  price per gram of pure gold, % over spot, premium over gold value
+- `compute({spot, price, gram, purity, spread})` — core math: pure-gold weight, gold value,
+  price per gram of pure gold, % over spot, premium over gold value, plus break-even
+  spot price and % distance to it (undefined when spread is blank or outside [0, 100))
 
 **Data fetch**
-- `fetchSpotDKKperGram()` — spot price in DKK/gram of pure gold; combines
-  gold price (USD/oz) with USD→DKK FX. Both endpoints are CORS-open, so no proxy.
-  8 s `AbortSignal.timeout` → on failure the UI falls back to manual entry.
+- `fetchSpotData()` — returns raw `{ ozUsd, rates }` (gold USD/oz + all FX rates against
+  USD in one call). Both endpoints are CORS-open, so no proxy. 8 s `AbortSignal.timeout`
+  → on failure the UI falls back to manual entry.
+- `spotInCurrency(raw, code)` — spot per gram in a currency; integer-rounds ≥300,
+  keeps 2 decimals below (EUR/USD gram prices). Currency switches convert locally
+  from the cached raw data without refetching.
 
 **Components**
 - `GoldValueCalculator` (default export) — state, spot auto-load, inputs, result card,
@@ -62,7 +69,7 @@ Single file containing all logic and presentation.
 ## External APIs
 
 - **Spot:** `https://api.gold-api.com/price/XAU` → `price` (USD per troy oz)
-- **FX:** `https://open.er-api.com/v6/latest/USD` → `rates.DKK`
+- **FX:** `https://open.er-api.com/v6/latest/USD` → `rates` (all currencies vs USD)
 - Both send `Access-Control-Allow-Origin: *` (chosen over goldprice.org, which blocks
   datacenter IPs). On fetch failure the spot field falls back to manual entry.
 

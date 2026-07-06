@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
 // ---- design tokens (matches the printed feltkort) ----
 // Colors live in CSS custom properties (see CSS below) so the palette can
@@ -42,6 +42,7 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--gold); outl
 .remove-btn:hover { color: var(--bad); }
 @media (max-width: 380px) {
   .metric-grid { grid-template-columns: 1fr !important; }
+  .input-grid { grid-template-columns: 1fr !important; }
 }
 `;
 
@@ -57,6 +58,14 @@ const KARATS = [
   { k: "8k", purity: 0.333 },
 ];
 
+const CURRENCIES = [
+  { code: "DKK", unit: "kr" },
+  { code: "TRY", unit: "₺" },
+  { code: "EUR", unit: "€" },
+  { code: "USD", unit: "$" },
+];
+const unitFor = (code) => (CURRENCIES.find((c) => c.code === code) || CURRENCIES[0]).unit;
+
 // parse Danish-style input (comma decimals, dot thousands).
 // A lone dot is only a thousands separator when it groups exactly 3 digits
 // ("8.800" → 8800); otherwise it's a decimal point ("8.8" → 8.8).
@@ -71,10 +80,10 @@ const num = (s) => {
   const v = parseFloat(t);
   return isNaN(v) ? NaN : v;
 };
-const kr = (v) =>
-  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " kr" : "—";
-const krg = (v) =>
-  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " kr/g" : "—";
+const money = (v, unit) =>
+  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " " + unit : "—";
+const moneyPerG = (v, unit) =>
+  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " " + unit + "/g" : "—";
 const g = (v) =>
   isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 2 }) + " g" : "—";
 const pct = (v) =>
@@ -91,7 +100,7 @@ function verdictFor(p) {
   return { label: "For dyrt", sub: "Du betaler for smykke, ikke guld", color: T.bad };
 }
 
-function compute({ spot, price, gram, purity }) {
+function compute({ spot, price, gram, purity, spread }) {
   const s = num(spot), p = num(price), w = num(gram);
   if (![s, p, w].every(isFinite) || w <= 0 || p <= 0 || s <= 0) return null;
   const pure = w * purity;
@@ -99,13 +108,23 @@ function compute({ spot, price, gram, purity }) {
   const pricePerG = p / pure;
   const overSpot = (pricePerG / s - 1) * 100;
   const premium = p - goldValue;
-  return { pure, goldValue, pricePerG, overSpot, premium };
+  // break-even: the spot price at which selling back at spot × (1 − spread)
+  // recoups the price paid. Blank/negative/≥100% spread leaves these undefined.
+  let breakEvenSpot, breakEvenDelta;
+  const spreadFrac = num(spread) / 100;
+  if (isFinite(spreadFrac) && spreadFrac >= 0 && spreadFrac < 1) {
+    breakEvenSpot = pricePerG / (1 - spreadFrac);
+    breakEvenDelta = (breakEvenSpot / s - 1) * 100;
+  }
+  return { pure, goldValue, pricePerG, overSpot, premium, breakEvenSpot, breakEvenDelta };
 }
 
-// ---- live spot fetch (DKK per gram of pure gold) ----
+// ---- live spot fetch (per gram of pure gold, any currency) ----
 // api.gold-api.com returns Access-Control-Allow-Origin: * so no proxy is needed
 // in dev or prod (unlike goldprice.org, which blocks non-browser/datacenter IPs).
-async function fetchSpotDKKperGram() {
+// The FX endpoint returns all rates against USD in one call, so currency
+// switching reuses the raw data without refetching.
+async function fetchSpotData() {
   const signal = AbortSignal.timeout(8000); // don't hang forever on a dead API
   const [gr, fr] = await Promise.all([
     fetch("https://api.gold-api.com/price/XAU", { cache: "no-store", signal }),
@@ -114,13 +133,24 @@ async function fetchSpotDKKperGram() {
   const gold = await gr.json();
   const fx = await fr.json();
   const ozUsd = gold?.price;
-  const dkk = fx?.rates?.DKK;
-  if (ozUsd > 0 && dkk > 0) return { value: (ozUsd / OZ) * dkk, source: "gold-api.com + FX" };
+  const rates = fx?.rates;
+  if (ozUsd > 0 && rates && typeof rates === "object")
+    return { ozUsd, rates, source: "gold-api.com + FX" };
   throw new Error("no-source");
 }
 
+// spot per gram in a currency; keep decimals when the number is small
+// (EUR/USD grams ~100) so integer rounding doesn't cost half a percent.
+const spotInCurrency = ({ ozUsd, rates }, code) => {
+  const rate = rates?.[code];
+  if (!(ozUsd > 0 && rate > 0)) return NaN;
+  const v = (ozUsd / OZ) * rate;
+  return v >= 300 ? Math.round(v) : Math.round(v * 100) / 100;
+};
+
 // ---- comparison-list persistence ----
 const LS_KEY = "goldcalc.list";
+const CUR_KEY = "goldcalc.currency";
 const loadList = () => {
   try {
     const v = JSON.parse(localStorage.getItem(LS_KEY));
@@ -134,23 +164,45 @@ export default function GoldValueCalculator() {
   const [spot, setSpot] = useState("");
   const [spotStatus, setSpotStatus] = useState("loading"); // loading | live | manual | error
   const [spotMeta, setSpotMeta] = useState({ time: "", source: "" });
+  const [spotRaw, setSpotRaw] = useState(null); // { ozUsd, rates } from last successful fetch
   const [price, setPrice] = useState("");
   const [gram, setGram] = useState("");
   const [karat, setKarat] = useState("22k");
+  const [spread, setSpread] = useState("10");
+  const [currency, setCurrency] = useState(() => {
+    try {
+      const c = localStorage.getItem(CUR_KEY);
+      return CURRENCIES.some((x) => x.code === c) ? c : "DKK";
+    } catch {
+      return "DKK";
+    }
+  });
   const [list, setList] = useState(loadList);
 
   useEffect(() => {
     try { localStorage.setItem(LS_KEY, JSON.stringify(list)); } catch { /* storage full/blocked */ }
   }, [list]);
 
+  useEffect(() => {
+    try { localStorage.setItem(CUR_KEY, currency); } catch { /* storage full/blocked */ }
+  }, [currency]);
+
+  // loadSpot reads currency via a ref so the mount effect doesn't refetch on
+  // every currency switch — switching converts locally from spotRaw instead.
+  const currencyRef = useRef(currency);
+  useEffect(() => { currencyRef.current = currency; }, [currency]);
+
   const loadSpot = useCallback(async () => {
     setSpotStatus("loading");
     try {
-      const { value, source } = await fetchSpotDKKperGram();
-      setSpot(String(Math.round(value)));
+      const raw = await fetchSpotData();
+      const value = spotInCurrency(raw, currencyRef.current);
+      if (!isFinite(value)) throw new Error("no-rate");
+      setSpotRaw(raw);
+      setSpot(String(value).replace(".", ","));
       setSpotMeta({
         time: new Date().toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" }),
-        source,
+        source: raw.source,
       });
       setSpotStatus("live");
     } catch {
@@ -160,14 +212,36 @@ export default function GoldValueCalculator() {
 
   useEffect(() => { loadSpot(); }, [loadSpot]);
 
+  const changeCurrency = (next) => {
+    if (next === currency) return;
+    const rates = spotRaw?.rates;
+    if (spotStatus === "live" && spotRaw && rates?.[next] > 0) {
+      setSpot(String(spotInCurrency(spotRaw, next)).replace(".", ","));
+    } else {
+      // manual/error: convert the typed value if we have rates, else keep it
+      const v = num(spot);
+      if (isFinite(v) && rates?.[next] > 0 && rates?.[currency] > 0) {
+        const converted = (v * rates[next]) / rates[currency];
+        const rounded = converted >= 300 ? Math.round(converted) : Math.round(converted * 100) / 100;
+        setSpot(String(rounded).replace(".", ","));
+      }
+    }
+    setCurrency(next);
+  };
+
   const purity = KARATS.find((x) => x.k === karat).purity;
-  const r = useMemo(() => compute({ spot, price, gram, purity }), [spot, price, gram, purity]);
+  const r = useMemo(() => compute({ spot, price, gram, purity, spread }), [spot, price, gram, purity, spread]);
   const v = r ? verdictFor(r.overSpot) : null;
-  const bestG = list.length ? Math.min(...list.map((x) => x.pricePerG)) : Infinity;
+  const unit = unitFor(currency);
+  // best-buy only competes within the active currency — raw numbers across
+  // currencies aren't comparable.
+  const sameCur = list.filter((x) => (x.currency || "DKK") === currency);
+  const bestG = sameCur.length ? Math.min(...sameCur.map((x) => x.pricePerG)) : Infinity;
+  const mixedCur = list.some((x) => (x.currency || "DKK") !== currency);
 
   const add = () => {
     if (!r) return;
-    setList((l) => [{ id: Date.now(), karat, gram: num(gram), price: num(price), spotAtSave: num(spot), ...r }, ...l]);
+    setList((l) => [{ id: Date.now(), karat, gram: num(gram), price: num(price), spotAtSave: num(spot), spreadAtSave: num(spread), currency, ...r }, ...l]);
   };
 
   const S = {
@@ -198,7 +272,7 @@ export default function GoldValueCalculator() {
             Guld eller markup?
           </h1>
           <p style={{ color: T.inkSoft, fontSize: 14.5, margin: "10px 0 0", maxWidth: "44ch" }}>
-            Spotprisen hentes automatisk. Tast pris, vægt og karat — så ser du din reelle pris per gram rent guld og hvor langt over spot du betaler.
+            Spotprisen hentes automatisk. Tast pris, vægt og karat — så ser du din reelle pris per gram rent guld, hvor langt over spot du betaler, og hvad spot skal stige til, før du kan sælge tilbage uden tab.
           </p>
         </div>
 
@@ -215,6 +289,17 @@ export default function GoldValueCalculator() {
               {spotStatus === "loading" ? "…" : "Opdater"}
             </button>
           </div>
+          <div role="group" aria-label="Valuta" style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            {CURRENCIES.map((c) => {
+              const on = c.code === currency;
+              return (
+                <button key={c.code} className="karat-btn" aria-pressed={on} onClick={() => changeCurrency(c.code)}
+                  style={{ fontFamily: T.mono, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "6px 10px", borderRadius: 5, border: `1px solid ${on ? T.gold : T.line}`, background: on ? T.goldBg : T.card, color: on ? T.gold : T.inkSoft }}>
+                  {c.code}
+                </button>
+              );
+            })}
+          </div>
           <div style={{ position: "relative" }}>
             <input
               id="spot-input"
@@ -224,7 +309,7 @@ export default function GoldValueCalculator() {
               onChange={(e) => { setSpot(e.target.value); setSpotStatus("manual"); }}
               placeholder={spotStatus === "loading" ? "…" : "fx 875"}
             />
-            <span style={S.suffix}>kr / gram</span>
+            <span style={S.suffix}>{unit} / gram</span>
           </div>
           <div aria-live="polite" style={{ fontFamily: T.mono, fontSize: 11.5, color: tag.color, marginTop: 6 }}>
             {tag.text}
@@ -233,12 +318,12 @@ export default function GoldValueCalculator() {
         </div>
 
         {/* inputs */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div className="input-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
           <div style={{ position: "relative" }}>
             <label htmlFor="price-input" style={S.label}>Pris</label>
             <div style={{ position: "relative" }}>
               <input id="price-input" style={S.input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="8.800" />
-              <span style={S.suffix}>kr</span>
+              <span style={S.suffix}>{unit}</span>
             </div>
           </div>
           <div style={{ position: "relative" }}>
@@ -265,6 +350,16 @@ export default function GoldValueCalculator() {
               })}
             </div>
           </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <label htmlFor="spread-input" style={S.label}>Spread ved tilbagesalg</label>
+            <div style={{ position: "relative" }}>
+              <input id="spread-input" style={S.input} inputMode="decimal" value={spread} onChange={(e) => setSpread(e.target.value)} placeholder="10" />
+              <span style={S.suffix}>%</span>
+            </div>
+            <div style={{ fontFamily: T.mono, fontSize: 11.5, color: T.inkSoft, marginTop: 6 }}>
+              Rabat en opkøber typisk trækker fra spot ved tilbagekøb — bruges til break-even.
+            </div>
+          </div>
         </div>
 
         {/* result */}
@@ -283,11 +378,13 @@ export default function GoldValueCalculator() {
             </div>
           </div>
           <div className="metric-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-            <Metric label="Din guldpris" value={r ? krg(r.pricePerG) : "—"} big accent />
-            <Metric label="Spot-gulv" value={isFinite(num(spot)) ? krg(num(spot)) : "—"} big />
+            <Metric label="Din guldpris" value={r ? moneyPerG(r.pricePerG, unit) : "—"} big accent />
+            <Metric label="Spot-gulv" value={isFinite(num(spot)) ? moneyPerG(num(spot), unit) : "—"} big />
             <Metric label="Rent guld i stykket" value={r ? g(r.pure) : "—"} />
-            <Metric label="Guldværdi ved spot" value={r ? kr(r.goldValue) : "—"} />
-            <Metric label="Merpris over guldværdi" value={r ? (r.premium >= 0 ? "+" : "−") + kr(Math.abs(r.premium)) : "—"} span />
+            <Metric label="Guldværdi ved spot" value={r ? money(r.goldValue, unit) : "—"} />
+            <Metric label="Merpris over guldværdi" value={r ? (r.premium >= 0 ? "+" : "−") + money(Math.abs(r.premium), unit) : "—"} span />
+            <Metric label="Break-even spotpris" value={r && isFinite(r.breakEvenSpot) ? moneyPerG(r.breakEvenSpot, unit) : "—"} />
+            <Metric label="Afstand til break-even" value={r && isFinite(r.breakEvenDelta) ? pct(r.breakEvenDelta) : "—"} />
           </div>
         </div>
 
@@ -306,19 +403,21 @@ export default function GoldValueCalculator() {
             </div>
             <div style={{ fontSize: 12.5, color: T.inkSoft, marginBottom: 10 }}>
               Sorteret efter bedste guldværdi. Grøn = laveste pris per gram rent guld.
+              {mixedCur && " Poster i anden valuta konkurrerer ikke om bedste køb."}
             </div>
             {[...list].sort((a, b) => a.pricePerG - b.pricePerG).map((x) => {
               const vv = verdictFor(x.overSpot);
-              const best = x.pricePerG === bestG;
+              const xUnit = unitFor(x.currency || "DKK");
+              const best = x.pricePerG === bestG && (x.currency || "DKK") === currency;
               return (
                 <div key={x.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", marginBottom: 8, background: T.card, borderRadius: 6, border: `1px solid ${best ? T.good : T.line}` }}>
                   <div style={{ width: 8, height: 8, borderRadius: "50%", background: vv.color, flex: "none" }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 600 }}>
-                      {x.karat} · {g(x.gram)} · {kr(x.price)}
+                      {x.karat} · {g(x.gram)} · {money(x.price, xUnit)}
                     </div>
                     <div style={{ fontSize: 12.5, color: T.inkSoft, marginTop: 1 }}>
-                      {krg(x.pricePerG)} · {pct(x.overSpot)} over spot
+                      {moneyPerG(x.pricePerG, xUnit)} · {pct(x.overSpot)} over spot
                       {best && <span style={{ color: T.good, fontWeight: 600 }}> · bedste køb</span>}
                     </div>
                   </div>

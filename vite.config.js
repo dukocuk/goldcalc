@@ -3,4 +3,13 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    proxy: {
+      "/api/goldprice": {
+        target: "https://data-asg.goldprice.org",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/goldprice/, "/dbXRates"),
+      },
+    },
+  },
 });

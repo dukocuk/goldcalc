@@ -1,4 +1,9 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import {
+  KARATS, CURRENCIES, unitFor,
+  num, money, moneyPerG, g, pct,
+  verdictFor, compute, spotInCurrency,
+} from "./logic.js";
 
 // ---- design tokens (Dark Luxe Gold) ----
 // Colors live in CSS custom properties (see CSS below); T just references them so
@@ -81,78 +86,8 @@ input:focus-visible, button:focus-visible {
 }
 `;
 
-const OZ = 31.1035; // gram per troy ounce
-
-const KARATS = [
-  { k: "24k", purity: 1.0 },
-  { k: "22k", purity: 0.916 },
-  { k: "21k", purity: 0.875 },
-  { k: "18k", purity: 0.75 },
-  { k: "14k", purity: 0.585 },
-  { k: "9k", purity: 0.375 },
-  { k: "8k", purity: 0.333 },
-];
-
-const CURRENCIES = [
-  { code: "DKK", unit: "kr" },
-  { code: "TRY", unit: "₺" },
-  { code: "EUR", unit: "€" },
-  { code: "USD", unit: "$" },
-];
-const unitFor = (code) => (CURRENCIES.find((c) => c.code === code) || CURRENCIES[0]).unit;
-
-// parse Danish-style input (comma decimals, dot thousands).
-// A lone dot is only a thousands separator when it groups exactly 3 digits
-// ("8.800" → 8800); otherwise it's a decimal point ("8.8" → 8.8).
-const num = (s) => {
-  if (s === "" || s == null) return NaN;
-  let t = String(s).trim();
-  if (t.includes(",")) {
-    t = t.replace(/\./g, "").replace(",", ".");
-  } else if ((t.match(/\./g) || []).length > 1 || /^\d{1,3}(\.\d{3})+$/.test(t)) {
-    t = t.replace(/\./g, "");
-  }
-  const v = parseFloat(t);
-  return isNaN(v) ? NaN : v;
-};
-const money = (v, unit) =>
-  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " " + unit : "—";
-const moneyPerG = (v, unit) =>
-  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " " + unit + "/g" : "—";
-const g = (v) =>
-  isFinite(v) ? v.toLocaleString("da-DK", { maximumFractionDigits: 2 }) + " g" : "—";
-const pct = (v) =>
-  isFinite(v)
-    ? (v >= 0 ? "+" : "−") +
-      Math.abs(v).toLocaleString("da-DK", { maximumFractionDigits: 0 }) + " %"
-    : "—";
-
-function verdictFor(p) {
-  if (!isFinite(p)) return null;
-  if (p < 0) return { label: "Under spot", sub: "Tjek at prisen er dagsaktuel", color: T.good };
-  if (p <= 10) return { label: "Fremragende", sub: "Reelt investeringsguld", color: T.good };
-  if (p <= 25) return { label: "OK", sub: "Hvis du også vil bære det", color: T.ok };
-  return { label: "For dyrt", sub: "Du betaler for smykke, ikke guld", color: T.bad };
-}
-
-function compute({ spot, price, gram, purity, spread }) {
-  const s = num(spot), p = num(price), w = num(gram);
-  if (![s, p, w].every(isFinite) || w <= 0 || p <= 0 || s <= 0) return null;
-  const pure = w * purity;
-  const goldValue = pure * s;
-  const pricePerG = p / pure;
-  const overSpot = (pricePerG / s - 1) * 100;
-  const premium = p - goldValue;
-  // break-even: the spot price at which selling back at spot × (1 − spread)
-  // recoups the price paid. Blank/negative/≥100% spread leaves these undefined.
-  let breakEvenSpot, breakEvenDelta;
-  const spreadFrac = num(spread) / 100;
-  if (isFinite(spreadFrac) && spreadFrac >= 0 && spreadFrac < 1) {
-    breakEvenSpot = pricePerG / (1 - spreadFrac);
-    breakEvenDelta = (breakEvenSpot / s - 1) * 100;
-  }
-  return { pure, goldValue, pricePerG, overSpot, premium, breakEvenSpot, breakEvenDelta };
-}
+// map a verdict's semantic tone to the theme color
+const toneColor = (v) => T[v.tone];
 
 // ---- live spot fetch (per gram of pure gold, any currency) ----
 // api.gold-api.com returns Access-Control-Allow-Origin: * so no proxy is needed
@@ -173,15 +108,6 @@ async function fetchSpotData() {
     return { ozUsd, rates, source: "gold-api.com + FX" };
   throw new Error("no-source");
 }
-
-// spot per gram in a currency; keep decimals when the number is small
-// (EUR/USD grams ~100) so integer rounding doesn't cost half a percent.
-const spotInCurrency = ({ ozUsd, rates }, code) => {
-  const rate = rates?.[code];
-  if (!(ozUsd > 0 && rate > 0)) return NaN;
-  const v = (ozUsd / OZ) * rate;
-  return v >= 300 ? Math.round(v) : Math.round(v * 100) / 100;
-};
 
 // ---- comparison-list persistence ----
 const LS_KEY = "goldcalc.list";
@@ -257,8 +183,8 @@ function Meter({ overSpot }) {
             className="meter-fill"
             style={{
               position: "absolute", top: -3, left: `calc(${posPct}% )`, transform: "translateX(-50%)",
-              width: 4, height: 14, borderRadius: 999, background: v.color,
-              boxShadow: `0 0 10px 1px ${v.color}`,
+              width: 4, height: 14, borderRadius: 999, background: toneColor(v),
+              boxShadow: `0 0 10px 1px ${toneColor(v)}`,
             }}
           />
         )}
@@ -488,14 +414,14 @@ export default function GoldValueCalculator() {
         <div className="glass lift" style={{ marginTop: 22, overflow: "hidden" }}>
           <div style={{ padding: "18px 20px", background: v ? "linear-gradient(180deg, rgba(214,167,44,.10), rgba(214,167,44,.02))" : "transparent", borderBottom: `1px solid ${T.line}`, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
             <div>
-              <div className="verdict-label" style={{ fontFamily: T.serif, fontSize: 22, fontWeight: 600, color: v ? v.color : T.inkFaint }}>
+              <div className="verdict-label" style={{ fontFamily: T.serif, fontSize: 22, fontWeight: 600, color: v ? toneColor(v) : T.inkFaint }}>
                 {v ? v.label : "Afventer input"}
               </div>
               <div style={{ fontSize: 13, color: T.inkSoft, marginTop: 3 }}>
                 {v ? v.sub : "Udfyld pris, vægt og karat"}
               </div>
             </div>
-            <div className="verdict-num" style={{ fontFamily: T.mono, fontSize: 30, fontWeight: 700, color: v ? v.color : T.inkFaint, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+            <div className="verdict-num" style={{ fontFamily: T.mono, fontSize: 30, fontWeight: 700, color: v ? toneColor(v) : T.inkFaint, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
               {r ? pct(overCount) : "—"}
             </div>
           </div>
@@ -534,7 +460,7 @@ export default function GoldValueCalculator() {
               const best = x.pricePerG === bestG && (x.currency || "DKK") === currency;
               return (
                 <div key={x.id} className="lift" style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", marginBottom: 9, background: T.panel, borderRadius: 12, border: `1px solid ${best ? "rgba(111,207,151,.55)" : T.line}`, boxShadow: best ? "0 0 26px -10px rgba(111,207,151,.5)" : "none" }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: vv.color, boxShadow: `0 0 8px ${vv.color}`, flex: "none" }} />
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: toneColor(vv), boxShadow: `0 0 8px ${toneColor(vv)}`, flex: "none" }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 600 }}>
                       {x.karat} · {g(x.gram)} · {money(x.price, xUnit)}
